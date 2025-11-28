@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 print("[RISK_FC] System initializing - Final Production with Rule Engine v2.0")
 
 # ==========================================
-# 1. CONFIGURATION
+# 1. CONFIGURATION 
 # ==========================================
 # DB Config (use env vars in production)
 DB_HOST = os.environ.get("DB_HOST", "YOUR_HOLOGRES_HOST")
