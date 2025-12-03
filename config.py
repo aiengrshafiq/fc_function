@@ -35,11 +35,22 @@ LARK_WEBHOOK_URL = os.environ.get(
 )
 
 # -----------------------------
-# Blockchair Config
+# Blockchair & Sanctions Config
 # -----------------------------
+
+
+
+# --- Sanctions / Blockchair ---
+CHAINALYSIS_API_KEY  = os.environ.get("CHAINALYSIS_API_KEY", "")
+CHAINALYSIS_URL      = os.environ.get("CHAINALYSIS_URL", "https://public.chainalysis.com/api/v1/address")
+
 BLOCKCHAIR_API_KEY   = os.environ.get("BLOCKCHAIR_API_KEY", "")
-BLOCKCHAIR_BASE_URL  = "https://api.blockchair.com"
-DEST_AGE_CACHE_TTL   = 3600 * 6   # 6 hours
+BLOCKCHAIR_BASE_URL  = os.environ.get("BLOCKCHAIR_BASE_URL", "https://api.blockchair.com")
+
+SANCTIONS_CACHE_TTL  = int(os.environ.get("SANCTIONS_CACHE_TTL", "3600"))      # 1 hour
+DEST_AGE_CACHE_TTL   = int(os.environ.get("DEST_AGE_CACHE_TTL", "21600"))     # 6 hours
+
+
 
 # -----------------------------
 # Caching TTLs

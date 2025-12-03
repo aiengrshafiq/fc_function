@@ -267,6 +267,58 @@ def handler(event, context):
     except Exception as e:
         print(f"[RISK_FC] Error in address whitelist check: {e}")
 
+
+
+    # ==========================
+    # 3b. Sanctions + Destination Age (temporary synchronous check)
+    # ==========================
+    if dest_address:
+        # (1) Sanctions screening
+        try:
+            is_bad = core.check_sanctions_api(dest_address)
+        except Exception as e:
+            print(f"[RISK_FC] Error calling sanctions API: {e}")
+            is_bad = False
+
+        # Expose to rules as well
+        features["is_sanctioned"] = bool(is_bad)
+
+        # (2) Destination age enrichment (only if not already filled)
+        try:
+            existing_age = features.get("destination_age_hours")
+            if existing_age in (None, 0):
+                age_hours = core.fetch_destination_age_hours(dest_address)
+                if age_hours is not None:
+                    features["destination_age_hours"] = age_hours
+                    core.update_destination_age(user_code, final_txn_id, age_hours)
+        except Exception as e:
+            print(f"[RISK_FC] Error enriching destination_age_hours: {e}")
+
+        # (3) If sanctioned → immediate REJECT
+        if is_bad:
+            final_result = {
+                "decision": "REJECT",
+                "primary_threat": "SANCTIONS",
+                "risk_score": 100,
+                "narrative": f"CRITICAL: Destination address {dest_address} is SANCTIONED.",
+            }
+            source = "SANCTIONS_ENGINE"
+
+            core.log_decision_to_db(user_code, final_txn_id, final_result, features, source)
+
+            result_payload = {
+                "user_code": user_code,
+                "txn_id": final_txn_id,
+                "decision": "REJECT",
+                "reasons": [final_result["narrative"]],
+                "risk_score": 100,
+                "primary_threat": "SANCTIONS",
+                "source": source,
+            }
+            core.send_lark_notification(result_payload)
+            return _make_response(200, result_payload)
+
+
     # ==========================
     # 4. Direct REJECT via Blacklists
     # ==========================

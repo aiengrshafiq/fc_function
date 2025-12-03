@@ -7,6 +7,7 @@ import time
 import psycopg2
 import urllib.request
 import urllib.error
+from datetime import datetime, timezone   # <-- ADD THIS
 
 import config as cfg
 
@@ -14,6 +15,10 @@ print("[RISK_FC] Loading core.py")
 
 _RULES_CACHE     = None
 _LAST_CACHE_TIME = 0
+
+# Sanctions & destination-age caches (lightweight in-memory)
+_SANCTIONS_CACHE = {}
+_DEST_AGE_CACHE  = {}
 
 
 # ==========================
@@ -628,6 +633,179 @@ def check_greylist(features):
     except Exception as e:
         print(f"[RISK_FC] Error checking greylist: {e}")
         return None
+    finally:
+        if conn:
+            conn.close()
+
+
+
+# ==========================
+# SANCTIONS & DESTINATION AGE (temporary synchronous enrichment)
+# ==========================
+
+def check_sanctions_api(address: str) -> bool:
+    """
+    Synchronous sanctions screening via Chainalysis.
+    Returns True if address is sanctioned / flagged.
+    Uses a simple in-memory cache to avoid hammering the API.
+    """
+    if not address or not cfg.CHAINALYSIS_API_KEY:
+        # If API key is missing, we silently treat as "not sanctioned"
+        # (better than breaking the FC; you'll see this in logs)
+        print("[RISK_FC] Sanctions API key missing or empty; skipping sanctions check.")
+        return False
+
+    now = time.time()
+    ttl = getattr(cfg, "SANCTIONS_CACHE_TTL", 3600)
+
+    # Cache hit?
+    if address in _SANCTIONS_CACHE:
+        is_bad, ts = _SANCTIONS_CACHE[address]
+        if now - ts < ttl:
+            print(f"[RISK_FC] Sanctions Cache Hit for {address}: {is_bad}")
+            return is_bad
+
+    url = f"{cfg.CHAINALYSIS_URL}/{address}"
+    headers = {
+        "X-API-Key": cfg.CHAINALYSIS_API_KEY,
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0",
+    }
+
+    is_sanctioned = False
+
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=5) as response:
+            if response.status == 200:
+                data = json.loads(response.read().decode("utf-8"))
+                if len(data.get("identifications", [])) > 0:
+                    print(f"[RISK_FC] 🚨 SANCTION HIT: {address}")
+                    is_sanctioned = True
+            else:
+                print(f"[RISK_FC] Sanctions non-200: {response.status}")
+    except urllib.error.HTTPError as e:
+        print(f"[RISK_FC] Sanctions HTTP Error: {e.code}")
+    except Exception as e:
+        print(f"[RISK_FC] Sanctions API Error: {e}")
+
+    _SANCTIONS_CACHE[address] = (is_sanctioned, now)
+    return is_sanctioned
+
+
+def fetch_destination_age_hours(address: str):
+    """
+    Uses Blockchair to estimate how "old" the destination address is (in hours)
+    based on first_seen timestamps. This is a temporary synchronous enrichment,
+    until you move it to a dim + async job.
+    """
+    if not address or not cfg.BLOCKCHAIR_API_KEY:
+        return None
+
+    now   = time.time()
+    ttl   = getattr(cfg, "DEST_AGE_CACHE_TTL", 21600)  # default 6h
+    cache = _DEST_AGE_CACHE
+
+    if address in cache:
+        age_hours, ts = cache[address]
+        if now - ts < ttl:
+            print(f"[RISK_FC] Destination age cache hit for {address}: {age_hours}h")
+            return age_hours
+
+    # Very simple chain detection based on address pattern
+    def _detect_blockchair_chain(addr: str):
+        addr = addr.strip()
+        if addr.startswith("0x") and len(addr) == 42:
+            return "ethereum"
+        if addr.startswith("1") or addr.startswith("3") or addr.startswith("bc1"):
+            return "bitcoin"
+        if addr.startswith("T") and 30 <= len(addr) <= 36:
+            return "tron"
+        return None
+
+    chain = _detect_blockchair_chain(address)
+    if not chain:
+        print(f"[RISK_FC] Could not detect chain for address: {address}")
+        return None
+
+    url = f"{cfg.BLOCKCHAIR_BASE_URL}/{chain}/dashboards/address/{address}?key={cfg.BLOCKCHAIR_API_KEY}"
+    headers = {"Accept": "application/json", "User-Agent": "Mozilla/5.0"}
+
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=8) as response:
+            if response.status != 200:
+                print(f"[RISK_FC] Blockchair non-200: {response.status}")
+                return None
+            resp_json = json.loads(response.read().decode("utf-8"))
+    except Exception as e:
+        print(f"[RISK_FC] Blockchair API error: {e}")
+        return None
+
+    data = resp_json.get("data") or {}
+    if not data:
+        print(f"[RISK_FC] Blockchair empty data for {address}")
+        return None
+
+    addr_key = list(data.keys())[0]
+    addr_info = data.get(addr_key, {})
+    if "address" in addr_info and isinstance(addr_info["address"], dict):
+        addr_info = addr_info["address"]
+
+    first_seen_str = None
+    for key in ["first_seen_receiving", "first_seen_spending", "first_seen", "created_at"]:
+        val = addr_info.get(key)
+        if val:
+            first_seen_str = val
+            break
+
+    if not first_seen_str:
+        print(f"[RISK_FC] No first_seen timestamp for {address}")
+        return None
+
+    try:
+        dt_first = datetime.strptime(first_seen_str, "%Y-%m-%d %H:%M:%S").replace(
+            tzinfo=timezone.utc
+        )
+        first_ts = dt_first.timestamp()
+    except Exception as e:
+        print(f"[RISK_FC] Failed to parse first_seen '{first_seen_str}' for {address}: {e}")
+        return None
+
+    age_seconds = now - first_ts
+    if age_seconds < 0:
+        age_seconds = 0
+
+    age_hours = int(age_seconds // 3600)
+    cache[address] = (age_hours, now)
+    print(f"[RISK_FC] Destination age for {address}: {age_hours} hours")
+    return age_hours
+
+
+def update_destination_age(user_code, txn_id, age_hours):
+    """
+    Persist destination_age_hours into rt.risk_features.
+    This is a small DB write so that future rules / analytics can reuse it.
+    """
+    if age_hours is None:
+        return
+
+    conn = None
+    try:
+        conn = get_db_conn()
+        cur  = conn.cursor()
+        sql  = """
+            UPDATE rt.risk_features
+            SET destination_age_hours = %s
+            WHERE user_code = %s AND txn_id = %s
+        """
+        cur.execute(sql, (int(age_hours), str(user_code), str(txn_id)))
+        conn.commit()
+        print(
+            f"[RISK_FC] Updated destination_age_hours={age_hours} for user={user_code}, txn={txn_id}"
+        )
+    except Exception as e:
+        print(f"[RISK_FC] Failed to update destination_age_hours: {e}")
     finally:
         if conn:
             conn.close()

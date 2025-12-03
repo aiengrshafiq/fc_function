@@ -125,6 +125,41 @@ CREATE TEMPORARY TABLE dim_streaming_last_deposit (
     user_code BIGINT, last_deposit_ts BIGINT, PRIMARY KEY (user_code) NOT ENFORCED
 ) WITH ('connector'='hologres', 'dbname'='onebullex_rt', 'tablename'='rt.dim_streaming_last_deposit', 'username'='BASIC$shafiq', 'password'='HOLOGRES@424', 'endpoint'='hgpost-sg-u7g4iu5x2002-ap-northeast-1-vpc-st.hologres.aliyuncs.com:80', 'async'='true', 'enable_binlog_filter_push_down'='false');
 
+-- o. Last Login Cache (for time_since_user_login)
+CREATE TEMPORARY TABLE dim_last_login_cache (
+    user_code     BIGINT,
+    last_login_ts BIGINT,
+    PRIMARY KEY (user_code) NOT ENFORCED
+) WITH (
+    'connector' = 'hologres',
+    'dbname'    = 'onebullex_rt',
+    'tablename' = 'rt.dim_last_login_cache',
+    'username'  = 'BASIC$shafiq',
+    'password'  = 'HOLOGRES@424',
+    'endpoint'  = 'hgpost-sg-u7g4iu5x2002-ap-northeast-1-vpc-st.hologres.aliyuncs.com:80',
+    'async'     = 'true',
+    'enable_binlog_filter_push_down' = 'false'
+);
+
+-- p. Impossibe Travel
+CREATE TEMPORARY TABLE dim_impossible_travel (
+    user_code            BIGINT,
+    is_impossible_travel BOOLEAN,
+    last_withdraw_event  BIGINT,
+    PRIMARY KEY (user_code) NOT ENFORCED
+) WITH (
+    'connector' = 'hologres',
+    'dbname'    = 'onebullex_rt',
+    'tablename' = 'rt.dim_impossible_travel',
+    'username'  = 'BASIC$shafiq',
+    'password'  = 'HOLOGRES@424',
+    'endpoint'  = 'hgpost-sg-u7g4iu5x2002-ap-northeast-1-vpc-st.hologres.aliyuncs.com:80',
+    'async'     = 'true',
+    'enable_binlog_filter_push_down' = 'false'
+);
+
+
+
 -- =========================================
 -- 4. SINK: Wide Table
 -- =========================================
@@ -143,6 +178,7 @@ CREATE TEMPORARY TABLE risk_sink (
     is_new_ip BOOLEAN,
     is_impossible_travel BOOLEAN,
     time_since_critical_event DOUBLE,
+    time_since_user_login INT,
     withdrawal_ratio DOUBLE,
     session_risk_score INT,
     is_sanctioned BOOLEAN,
@@ -200,7 +236,13 @@ SELECT
     COALESCE(d.is_new_device, FALSE), -- Default to False (Safe) if cache missing
     COALESCE(d.is_new_ip, FALSE),
     
-    FALSE, CAST(NULL AS DOUBLE),
+    COALESCE(it.is_impossible_travel, FALSE) AS is_impossible_travel, 
+    CAST(NULL AS DOUBLE),
+    CASE                             -- 🔹 time_since_user_login (minutes)
+        WHEN ll.last_login_ts IS NULL THEN 999999
+        WHEN w.create_at <= ll.last_login_ts THEN 999999
+        ELSE CAST( (w.create_at - ll.last_login_ts) / 60000.0 AS INT)
+    END AS time_since_user_login,
 
     -- Ratio
     CASE 
@@ -309,4 +351,10 @@ LEFT JOIN dim_withdrawal_stats_90d FOR SYSTEM_TIME AS OF w.proc_time AS z ON w.u
 -- 13 NEW JOIN for rapid_cycling
 LEFT JOIN dim_streaming_last_trade FOR SYSTEM_TIME AS OF w.proc_time AS st ON w.user_code = st.user_code
 -- 14 NEW JOIN for rapid_cycling
-LEFT JOIN dim_streaming_last_deposit FOR SYSTEM_TIME AS OF w.proc_time AS sd ON w.user_code = sd.user_code;
+LEFT JOIN dim_streaming_last_deposit FOR SYSTEM_TIME AS OF w.proc_time AS sd ON w.user_code = sd.user_code
+-- 15 NEW JOIN for time_since_user_login
+LEFT JOIN dim_last_login_cache FOR SYSTEM_TIME AS OF w.proc_time AS ll
+    ON w.user_code = ll.user_code
+-- 16 Impossible Travel
+LEFT JOIN dim_impossible_travel FOR SYSTEM_TIME AS OF w.proc_time AS it
+    ON w.user_code = it.user_code
