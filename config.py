@@ -49,14 +49,7 @@ BLOCKCHAIR_BASE_URL  = os.environ.get("BLOCKCHAIR_BASE_URL", "https://api.blockc
 
 SANCTIONS_CACHE_TTL  = int(os.environ.get("SANCTIONS_CACHE_TTL", "3600"))      # 1 hour
 DEST_AGE_CACHE_TTL   = int(os.environ.get("DEST_AGE_CACHE_TTL", "21600"))     # 6 hours
-
-
-
-# -----------------------------
-# Caching TTLs
-# -----------------------------
 RULE_CACHE_TTL      = 300         # 5 minutes
-SANCTIONS_CACHE_TTL = 3600        # 1 hour
 
 # -----------------------------
 # Comprehensive Reasoning Prompt

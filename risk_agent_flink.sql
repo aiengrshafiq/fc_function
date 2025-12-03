@@ -158,6 +158,46 @@ CREATE TEMPORARY TABLE dim_impossible_travel (
     'enable_binlog_filter_push_down' = 'false'
 );
 
+-- q. Sanctions (address-level sanctions status)
+CREATE TEMPORARY TABLE dim_sanctions_address (
+    chain               STRING,
+    destination_address STRING,
+    is_sanctioned       BOOLEAN,
+    sanctions_status    STRING,
+    last_checked_at     TIMESTAMP_LTZ(3),
+    last_error          STRING,
+    PRIMARY KEY (chain, destination_address) NOT ENFORCED
+) WITH (
+    'connector' = 'hologres',
+    'dbname'    = 'onebullex_rt',
+    'tablename' = 'rt.dim_sanctions_address',
+    'username'  = 'BASIC$shafiq',
+    'password'  = 'HOLOGRES@424',
+    'endpoint'  = 'hgpost-sg-u7g4iu5x2002-ap-northeast-1-vpc-st.hologres.aliyuncs.com:80',
+    'async'     = 'true',
+    'enable_binlog_filter_push_down' = 'false'
+);
+
+-- r. Destination Age (wallet age in hours)
+CREATE TEMPORARY TABLE dim_destination_age (
+    chain                STRING,
+    destination_address  STRING,
+    destination_age_hours DOUBLE,
+    age_status           STRING,
+    first_seen_at        TIMESTAMP_LTZ(3),
+    last_checked_at      TIMESTAMP_LTZ(3),
+    last_error           STRING,
+    PRIMARY KEY (chain, destination_address) NOT ENFORCED
+) WITH (
+    'connector' = 'hologres',
+    'dbname'    = 'onebullex_rt',
+    'tablename' = 'rt.dim_destination_age',
+    'username'  = 'BASIC$shafiq',
+    'password'  = 'HOLOGRES@424',
+    'endpoint'  = 'hgpost-sg-u7g4iu5x2002-ap-northeast-1-vpc-st.hologres.aliyuncs.com:80',
+    'async'     = 'true',
+    'enable_binlog_filter_push_down' = 'false'
+);
 
 
 -- =========================================
@@ -170,15 +210,12 @@ CREATE TEMPORARY TABLE risk_sink (
     deposit_fan_out INT,
     withdrawal_fan_in INT,
     ip_density INT,
-    
-    device_density INT, --  Populated Now
-    
+    device_density INT,
     cluster_newness_ratio DOUBLE,
     is_new_device BOOLEAN,
     is_new_ip BOOLEAN,
     is_impossible_travel BOOLEAN,
     time_since_critical_event DOUBLE,
-    time_since_user_login INT,
     withdrawal_ratio DOUBLE,
     session_risk_score INT,
     is_sanctioned BOOLEAN,
@@ -190,16 +227,18 @@ CREATE TEMPORARY TABLE risk_sink (
     account_maturity INT,
     is_round_number BOOLEAN,
     abnormal_pnl DOUBLE,
-    withdrawal_deviation DOUBLE,
-    rapid_cycling BOOLEAN,
     days_since_whitelist_add DOUBLE,
-    
-    hours_since_fiat_deposit DOUBLE, --  Populated Now (as Deposit Cooldown)
-    
+    hours_since_fiat_deposit DOUBLE,
     arbitrage_flag DOUBLE,
     update_time TIMESTAMP_LTZ(3),
     destination_address STRING,
+    withdrawal_deviation DOUBLE,
+    rapid_cycling BOOLEAN,
+    time_since_user_login INT,
     withdrawal_amount DOUBLE,
+    sanctions_status STRING,
+    age_status STRING,
+
     PRIMARY KEY (user_code, txn_id) NOT ENFORCED
 ) WITH (
     'connector' = 'hologres',
@@ -218,97 +257,113 @@ CREATE TEMPORARY TABLE risk_sink (
 -- =========================================
 INSERT INTO risk_sink
 SELECT
-    CAST(w.user_code AS STRING),
-    --  FIX: Using 'w.code'
-    COALESCE(CAST(w.code AS STRING), CAST(w.id AS STRING)),
+    -- 1. Keys
+    CAST(w.user_code AS STRING) AS user_code,
+    COALESCE(CAST(w.code AS STRING), CAST(w.id AS STRING)) AS txn_id,
 
-    CAST(COALESCE(dfo.fan_out_count, 0) AS INT), -- Deposit Fan-Out
-    CAST(COALESCE(f.fan_in_count, 0) AS INT),    -- Withdrawal Fan-In
-    CAST(COALESCE(ips.distinct_users_24h, 1) AS INT), -- IP Density
+    -- 2. Fan-out / Fan-in / IP density / Device density
+    CAST(COALESCE(dfo.fan_out_count, 0) AS INT)      AS deposit_fan_out,
+    CAST(COALESCE(f.fan_in_count, 0) AS INT)         AS withdrawal_fan_in,
+    CAST(COALESCE(ips.distinct_users_24h, 1) AS INT) AS ip_density,
+    CAST(COALESCE(dd.user_count, 1) AS INT)          AS device_density,
 
-    -- ✅ Device Density (NEW)
-    -- Logic: Join Device Cache (to get Device ID) -> Join Device Stats
-    CAST(COALESCE(dd.user_count, 1) AS INT) AS device_density,
-
+    -- 3. Cluster Newness + Device flags
     CAST(COALESCE(inew.cluster_newness_ratio, 0.0) AS DOUBLE) AS cluster_newness_ratio,
+    COALESCE(d.is_new_device, FALSE) AS is_new_device,
+    COALESCE(d.is_new_ip, FALSE)     AS is_new_ip,
 
-    
-    COALESCE(d.is_new_device, FALSE), -- Default to False (Safe) if cache missing
-    COALESCE(d.is_new_ip, FALSE),
-    
-    COALESCE(it.is_impossible_travel, FALSE) AS is_impossible_travel, 
-    CAST(NULL AS DOUBLE),
-    CASE                             -- 🔹 time_since_user_login (minutes)
+    -- 4. Impossible travel + time_since_critical_event (placeholder)
+    COALESCE(it.is_impossible_travel, FALSE) AS is_impossible_travel,
+    CAST(NULL AS DOUBLE)                     AS time_since_critical_event,
+
+    -- 5. Withdrawal ratio
+    CASE 
+        WHEN c.total_balance_sum IS NULL OR c.total_balance_sum <= 0 THEN 1.0 
+        ELSE CAST(CAST(w.withdraw_amount AS DOUBLE) / c.total_balance_sum AS DOUBLE)
+    END AS withdrawal_ratio,
+
+    -- 6. Session risk score
+    COALESCE(d.session_risk_score, 0) AS session_risk_score,
+
+    -- 7. Sanctions feature
+    COALESCE(sanc.is_sanctioned, FALSE) AS is_sanctioned,
+
+    -- 8. KYC + source_risk_score (placeholders for future)
+    CAST(NULL AS DOUBLE) AS kyc_limit_utilization,
+    0                    AS source_risk_score,
+
+    -- 9. Destination age (wallet age in hours)
+    CAST(COALESCE(age.destination_age_hours, 0.0) AS INT) AS destination_age_hours,
+
+    -- 10. Passthrough turnover (trade_vol / withdraw_amount)
+    CASE 
+        WHEN CAST(w.withdraw_amount AS DOUBLE) <= 0 THEN 0.0
+        ELSE CAST(COALESCE(tv.trade_vol_24h, 0.0) / CAST(w.withdraw_amount AS DOUBLE) AS DOUBLE)
+    END AS passthrough_turnover,
+
+    -- 11. Structuring
+    CAST(COALESCE(s.structuring_count, 0) AS INT) AS structuring_velocity,
+
+    -- 12. Account maturity
+    CAST((w.create_at - c.create_at) / 86400000 AS INT) AS account_maturity,
+
+    -- 13. Round-number withdrawal
+    CASE WHEN CAST(w.withdraw_amount AS DOUBLE) % 1 = 0 THEN TRUE ELSE FALSE END AS is_round_number,
+
+    -- 14. Abnormal PnL placeholder
+    CAST(NULL AS DOUBLE) AS abnormal_pnl,
+
+    -- 15. Whitelist freshness placeholder
+    CAST(NULL AS DOUBLE) AS days_since_whitelist_add,
+
+    -- 16. Deposit cooldown (hours_since_fiat_deposit)
+    CASE 
+        WHEN ld.last_deposit_ts IS NULL THEN 99999.0
+        ELSE CAST((w.create_at - ld.last_deposit_ts) / 3600000.0 AS DOUBLE)
+    END AS hours_since_fiat_deposit,
+
+    -- 17. Arbitrage flag
+    CASE 
+        WHEN m.avg_price IS NOT NULL AND m.avg_price > 0 
+        THEN CAST( (CAST(w.exchange_rate AS DOUBLE) - m.avg_price) / m.avg_price AS DOUBLE)
+        ELSE 0.0 
+    END AS arbitrage_flag,
+
+    -- 18. Update_time + destination
+    CURRENT_TIMESTAMP           AS update_time,
+    w.address                   AS destination_address,
+
+    -- 19. Withdrawal deviation (Z-score over 90d stats)
+    CASE 
+        WHEN z.stddev_amount IS NULL OR z.stddev_amount = 0 THEN 0.0
+        ELSE CAST(
+            (CAST(w.withdraw_amount AS DOUBLE) - z.avg_amount) / z.stddev_amount
+            AS DOUBLE
+        )
+    END AS withdrawal_deviation,
+
+    -- 20. Rapid cycling: withdraw within 5 minutes of last streaming deposit
+    CASE
+        WHEN sd.last_deposit_ts IS NOT NULL
+             AND w.create_at >= sd.last_deposit_ts
+             AND (w.create_at - sd.last_deposit_ts) <= 300000
+        THEN TRUE
+        ELSE FALSE
+    END AS rapid_cycling,
+
+    -- 21. time_since_user_login (minutes)
+    CASE
         WHEN ll.last_login_ts IS NULL THEN 999999
         WHEN w.create_at <= ll.last_login_ts THEN 999999
         ELSE CAST( (w.create_at - ll.last_login_ts) / 60000.0 AS INT)
     END AS time_since_user_login,
 
-    -- Ratio
-    CASE 
-        WHEN c.total_balance_sum IS NULL OR c.total_balance_sum <= 0 THEN 1.0 
-        ELSE CAST(CAST(w.withdraw_amount AS DOUBLE) / c.total_balance_sum AS DOUBLE)
-    END,
+    -- 22. Raw withdrawal amount
+    CAST(w.withdraw_amount AS DOUBLE) AS withdrawal_amount,
 
-    COALESCE(d.session_risk_score, 0),
-
-    FALSE, CAST(NULL AS DOUBLE), 0, 0, 
-
-    -- Turnover
-    CASE 
-        WHEN CAST(w.withdraw_amount AS DOUBLE) <= 0 THEN 0.0
-        ELSE CAST(COALESCE(tv.trade_vol_24h, 0.0) / CAST(w.withdraw_amount AS DOUBLE) AS DOUBLE)
-    END,
-
-    CAST(COALESCE(s.structuring_count, 0) AS INT), -- Structuring
-    CAST((w.create_at - c.create_at) / 86400000 AS INT), -- Maturity
-    CASE WHEN CAST(w.withdraw_amount AS DOUBLE) % 1 = 0 THEN TRUE ELSE FALSE END, -- Round
-
-    CAST(NULL AS DOUBLE), 
-    -- ✅ Z-Score Anomaly (Mapped to 'abnormal_pnl' or similar slot, usually 'withdrawal_deviation' should be added to table if possible, but here using placeholder slot if needed. Assuming abnormal_pnl is appropriate or you can rename column in Sink)
-    -- Logic: (Current - Avg) / StdDev
-    CASE 
-        WHEN z.stddev_amount IS NULL OR z.stddev_amount = 0 THEN 0.0
-        ELSE CAST( (CAST(w.withdraw_amount AS DOUBLE) - z.avg_amount) / z.stddev_amount AS DOUBLE)
-    END,
-    --  Rapid Cycling Logic (Check against Streaming Caches)
-    -- 300,000 ms = 5 minutes
-    -- CASE 
-    --     WHEN (w.create_at - COALESCE(st.last_trade_ts, 0)) < 300000 THEN TRUE
-    --     WHEN (w.create_at - COALESCE(sd.last_deposit_ts, 0)) < 300000 THEN TRUE
-    --     ELSE FALSE
-    -- END,
-    CASE
-        WHEN sd.last_deposit_ts IS NOT NULL
-            AND w.create_at >= sd.last_deposit_ts
-            AND (w.create_at - sd.last_deposit_ts) <= 300000
-        THEN TRUE      -- any withdraw within 5 mins of deposit
-        ELSE FALSE
-    END AS rapid_cycling,
-    
-    CAST(NULL AS DOUBLE), -- Whitelist
-
-    -- ✅ Deposit Cooldown (NEW)
-    -- Logic: (Current Time - Last Deposit Time) in Hours
-    -- Handle NULL last_deposit (Never deposited) -> Return -1 or huge number (safe)
-    CASE 
-        WHEN ld.last_deposit_ts IS NULL THEN 99999.0 -- No deposits = Long time ago
-        ELSE CAST((w.create_at - ld.last_deposit_ts) / 3600000.0 AS DOUBLE)
-    END AS hours_since_fiat_deposit,
-
-    --CAST(NULL AS DOUBLE), this is extra
-    
-    -- Arbitrage
-    CASE 
-        WHEN m.avg_price IS NOT NULL AND m.avg_price > 0 
-        THEN CAST( (CAST(w.exchange_rate AS DOUBLE) - m.avg_price) / m.avg_price AS DOUBLE)
-        ELSE 0.0 
-    END,
-
-    CURRENT_TIMESTAMP,
-    w.address,
-    CAST(w.withdraw_amount AS DOUBLE)
-    
+    -- 23. Status columns from dims (fallback to PENDING)
+    COALESCE(sanc.sanctions_status, 'PENDING') AS sanctions_status,
+    COALESCE(age.age_status,        'PENDING') AS age_status
 
 FROM source_withdraw_record AS w
 -- 1. User Profile
@@ -335,26 +390,35 @@ LEFT JOIN dim_trade_volume_24h FOR SYSTEM_TIME AS OF w.proc_time AS tv
 -- 8. IP Stats
 LEFT JOIN dim_ip_stats_24h FOR SYSTEM_TIME AS OF w.proc_time AS ips
     ON d.last_ip = ips.ip
--- 9. Device Stats (NEW JOIN)
+-- 9. Device Stats
 LEFT JOIN dim_device_density_24h FOR SYSTEM_TIME AS OF w.proc_time AS dd
     ON d.last_device_id = dd.device_id
--- 10. Last Deposit (NEW JOIN)
+-- 10. Last Deposit (Cooldown)
 LEFT JOIN dim_last_deposit_cache FOR SYSTEM_TIME AS OF w.proc_time AS ld
     ON w.user_code = ld.user_code
--- 11. newness
+-- 11. Cluster Newness
 LEFT JOIN dim_ip_newness_24h FOR SYSTEM_TIME AS OF w.proc_time AS inew
     ON d.last_ip = inew.ip
-
--- 12 NEW JOIN for Z-Score
-LEFT JOIN dim_withdrawal_stats_90d FOR SYSTEM_TIME AS OF w.proc_time AS z ON w.user_code = z.user_code
-
--- 13 NEW JOIN for rapid_cycling
-LEFT JOIN dim_streaming_last_trade FOR SYSTEM_TIME AS OF w.proc_time AS st ON w.user_code = st.user_code
--- 14 NEW JOIN for rapid_cycling
-LEFT JOIN dim_streaming_last_deposit FOR SYSTEM_TIME AS OF w.proc_time AS sd ON w.user_code = sd.user_code
--- 15 NEW JOIN for time_since_user_login
+-- 12. Withdrawal stats 90d
+LEFT JOIN dim_withdrawal_stats_90d FOR SYSTEM_TIME AS OF w.proc_time AS z
+    ON w.user_code = z.user_code
+-- 13. Streaming last trade (reserved)
+LEFT JOIN dim_streaming_last_trade FOR SYSTEM_TIME AS OF w.proc_time AS st
+    ON w.user_code = st.user_code
+-- 14. Streaming last deposit (rapid_cycling)
+LEFT JOIN dim_streaming_last_deposit FOR SYSTEM_TIME AS OF w.proc_time AS sd
+    ON w.user_code = sd.user_code
+-- 15. Last login (time_since_user_login)
 LEFT JOIN dim_last_login_cache FOR SYSTEM_TIME AS OF w.proc_time AS ll
     ON w.user_code = ll.user_code
--- 16 Impossible Travel
+-- 16. Impossible travel
 LEFT JOIN dim_impossible_travel FOR SYSTEM_TIME AS OF w.proc_time AS it
     ON w.user_code = it.user_code
+-- 17. Sanctions dim
+LEFT JOIN dim_sanctions_address FOR SYSTEM_TIME AS OF w.proc_time AS sanc
+    ON w.withdraw_currency = sanc.chain
+   AND w.address           = sanc.destination_address
+-- 18. Destination age dim
+LEFT JOIN dim_destination_age FOR SYSTEM_TIME AS OF w.proc_time AS age
+    ON w.withdraw_currency = age.chain
+   AND w.address           = age.destination_address;
