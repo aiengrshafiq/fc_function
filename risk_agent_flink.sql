@@ -364,6 +364,7 @@ CREATE TEMPORARY TABLE risk_sink (
     user_greylisted     BOOLEAN,
     address_greylisted  BOOLEAN,
     ip_greylisted       BOOLEAN,
+    withdraw_currency STRING,
 
     PRIMARY KEY (user_code, txn_id) NOT ENFORCED
 ) WITH (
@@ -553,7 +554,10 @@ SELECT
          AND gi.status = 'ACTIVE'
          AND (gi.expires_at IS NULL OR gi.expires_at > CURRENT_TIMESTAMP)
         THEN TRUE ELSE FALSE
-    END AS ip_greylisted
+    END AS ip_greylisted,
+
+    -- 32. Token / currency symbol
+    w.withdraw_currency AS withdraw_currency
 
 
 

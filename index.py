@@ -209,6 +209,9 @@ def handler(event, context):
     features["user_code"] = user_code
     features["txn_id"]    = final_txn_id
 
+    withdrawal_amount = features.get("withdrawal_amount")
+    withdraw_currency = features.get("withdraw_currency")
+
     dest_address = features.get("destination_address")
     chain        = features.get("chain")  # optional, if you store it
 
@@ -236,6 +239,9 @@ def handler(event, context):
                 "risk_score": rule_result.get("risk_score", 100),
                 "primary_threat": rule_result.get("primary_threat", "RULE_HIT"),
                 "source": source,
+                    # NEW:
+                "withdrawal_amount": withdrawal_amount,
+                "withdraw_currency": withdraw_currency,
             }
             if decision in ("REJECT", "HOLD"):
                 core.send_lark_notification(result_payload)
@@ -251,6 +257,9 @@ def handler(event, context):
                 "risk_score": rule_result.get("risk_score", 100),
                 "primary_threat": rule_result.get("primary_threat", "RULE_HIT"),
                 "source": source,
+                # NEW:
+                "withdrawal_amount": withdrawal_amount,
+                "withdraw_currency": withdraw_currency,
             }
             core.send_lark_notification(hold_payload)
 
@@ -268,6 +277,9 @@ def handler(event, context):
                 "risk_score": ai_result.get("risk_score", 0),
                 "primary_threat": ai_result.get("primary_threat", "NONE"),
                 "source": ai_source,
+                # NEW:
+                "withdrawal_amount": withdrawal_amount,
+                "withdraw_currency": withdraw_currency,
             }
             return _make_response(200, final_payload)
 
@@ -291,5 +303,8 @@ def handler(event, context):
         "risk_score": 0,
         "primary_threat": "NONE",
         "source": source,
+        # NEW:
+        "withdrawal_amount": withdrawal_amount,
+        "withdraw_currency": withdraw_currency,
     }
     return _make_response(200, result_payload)

@@ -110,6 +110,10 @@ def send_lark_notification(data):
             else str(reasons or data.get("narrative", "No details provided"))
         )
 
+        # NEW: read amount + token
+        withdrawal_amount = data.get("withdrawal_amount")
+        withdraw_token    = data.get("withdraw_currency")
+
         card_content = {
             "msg_type": "interactive",
             "card": {
@@ -151,6 +155,22 @@ def send_lark_notification(data):
                                 "text": {
                                     "tag": "lark_md",
                                     "content": f"**Score:**\n{data.get('risk_score')}",
+                                },
+                            },
+                             # NEW: Token
+                            {
+                                "is_short": True,
+                                "text": {
+                                    "tag": "lark_md",
+                                    "content": f"**Token:**\n{withdraw_token}",
+                                },
+                            },
+                            # NEW: Amount
+                            {
+                                "is_short": True,
+                                "text": {
+                                    "tag": "lark_md",
+                                    "content": f"**Amount:**\n{withdrawal_amount}",
                                 },
                             },
                         ],
