@@ -143,21 +143,7 @@ def send_lark_notification(data):
                                     "content": f"**Txn ID:**\n{data.get('txn_id')}",
                                 },
                             },
-                            {
-                                "is_short": True,
-                                "text": {
-                                    "tag": "lark_md",
-                                    "content": f"**Threat:**\n{data.get('primary_threat')}",
-                                },
-                            },
-                            {
-                                "is_short": True,
-                                "text": {
-                                    "tag": "lark_md",
-                                    "content": f"**Score:**\n{data.get('risk_score')}",
-                                },
-                            },
-                             # NEW: Token
+                            # NEW: Token
                             {
                                 "is_short": True,
                                 "text": {
@@ -173,6 +159,21 @@ def send_lark_notification(data):
                                     "content": f"**Amount:**\n{withdrawal_amount}",
                                 },
                             },
+                            {
+                                "is_short": True,
+                                "text": {
+                                    "tag": "lark_md",
+                                    "content": f"**Threat:**\n{data.get('primary_threat')}",
+                                },
+                            },
+                            {
+                                "is_short": True,
+                                "text": {
+                                    "tag": "lark_md",
+                                    "content": f"**Score:**\n{data.get('risk_score')}",
+                                },
+                            },
+                            
                         ],
                     },
                     {"tag": "hr"},
