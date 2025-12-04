@@ -445,8 +445,3 @@ def call_gemini_reasoning_rest(features, rule_context=None):
         }
 
 
-
-
-
-
-
