@@ -224,12 +224,13 @@ def handler(event, context):
     rule_result = core.evaluate_fixed_rules(features, rules)
 
     if rule_result.get("triggered"):
-        decision = rule_result.get("decision", "HOLD")
+        decision = rule_result.get("decision", "HOLD")  # PASS / HOLD / REJECT from rules
         source   = "RULE_ENGINE_RULES"
 
+        # 6.1 Log Phase-1 (rule engine) decision for traceability
         core.log_decision_to_db(user_code, final_txn_id, rule_result, features, source)
 
-        # PASS / REJECT → final
+        # --- CASE A: PASS or REJECT → final, NO AI ---
         if decision in ("PASS", "REJECT"):
             result_payload = {
                 "user_code": user_code,
@@ -239,49 +240,57 @@ def handler(event, context):
                 "risk_score": rule_result.get("risk_score", 100),
                 "primary_threat": rule_result.get("primary_threat", "RULE_HIT"),
                 "source": source,
-                    # NEW:
                 "withdrawal_amount": withdrawal_amount,
                 "withdraw_currency": withdraw_currency,
             }
+            # REJECT → notify; PASS → no Lark
             if decision in ("REJECT", "HOLD"):
                 core.send_lark_notification(result_payload)
             return _make_response(200, result_payload)
 
-        # HOLD → alert + AI refinement
+        # --- CASE B: HOLD → Phase 2 AI Agent ---
         if decision == "HOLD":
-            hold_payload = {
-                "user_code": user_code,
-                "txn_id": final_txn_id,
-                "decision": "HOLD",
-                "reasons": [rule_result.get("narrative", "Rule HOLD")],
-                "risk_score": rule_result.get("risk_score", 100),
-                "primary_threat": rule_result.get("primary_threat", "RULE_HIT"),
-                "source": source,
-                # NEW:
-                "withdrawal_amount": withdrawal_amount,
-                "withdraw_currency": withdraw_currency,
-            }
-            core.send_lark_notification(hold_payload)
+            # Phase 2: call AI agent with features + rule context
+            ai_raw = core.call_gemini_reasoning_rest(features, rule_context=rule_result)
 
-            ai_result = core.call_gemini_reasoning_rest(features)
-            ai_source = "AI_AGENT_RULE_HOLD"
+            final_decision      = ai_raw.get("final_decision", "HOLD")
+            final_primary_threat = ai_raw.get("primary_threat", "NONE")
+            final_risk_score    = ai_raw.get("risk_score", 0)
+            final_confidence    = ai_raw.get("confidence", 0.7)
+            final_narrative     = ai_raw.get("narrative", "AI evaluation.")
+
+            # Prepare result object for DB logging
+            ai_log_result = {
+                "decision": final_decision,
+                "primary_threat": final_primary_threat,
+                "risk_score": final_risk_score,
+                "confidence": final_confidence,
+                "narrative": final_narrative,
+            }
+
+            ai_source = "AI_AGENT_REVIEW"
             core.log_decision_to_db(
-                user_code, final_txn_id, ai_result, features, ai_source
+                user_code, final_txn_id, ai_log_result, features, ai_source
             )
-            final_decision = ai_result.get("decision", "HOLD")
-            final_payload  = {
+
+            final_payload = {
                 "user_code": user_code,
                 "txn_id": final_txn_id,
                 "decision": final_decision,
-                "reasons": [ai_result.get("narrative", "AI evaluation")],
-                "risk_score": ai_result.get("risk_score", 0),
-                "primary_threat": ai_result.get("primary_threat", "NONE"),
+                "reasons": [final_narrative],
+                "risk_score": final_risk_score,
+                "primary_threat": final_primary_threat,
                 "source": ai_source,
-                # NEW:
                 "withdrawal_amount": withdrawal_amount,
                 "withdraw_currency": withdraw_currency,
             }
+
+            # Only final decision goes to Lark (HOLD or REJECT)
+            if final_decision in ("REJECT", "HOLD"):
+                core.send_lark_notification(final_payload)
+
             return _make_response(200, final_payload)
+
 
     # ==========================
     # 7. Default PASS

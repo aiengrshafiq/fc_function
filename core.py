@@ -254,8 +254,17 @@ def log_decision_to_db(user_code, txn_id, result, features, source):
         threat        = result.get("primary_threat", "UNKNOWN")
         narrative     = result.get("narrative", "")
         llm_reasoning = narrative
-        score         = result.get("risk_score", 0)
-        confidence    = float(score) / 100.0 if score >= 0 else 1.0
+
+        # NEW: prefer explicit confidence if provided, else derive from risk_score
+        if "confidence" in result:
+            try:
+                confidence = float(result.get("confidence"))
+            except Exception:
+                confidence = 0.7
+        else:
+            score = result.get("risk_score", 0)
+            confidence = float(score) / 100.0 if isinstance(score, (int, float)) and score >= 0 else 1.0
+
         features_json = json.dumps(features, default=str)
 
         cur.execute(
@@ -281,6 +290,7 @@ def log_decision_to_db(user_code, txn_id, result, features, source):
             conn.close()
 
 
+
 # ==========================
 # RULE EVALUATION (rt.risk_rules)
 # ==========================
@@ -303,6 +313,9 @@ def evaluate_fixed_rules(features, rules):
                     "primary_threat": "RULE_HIT",
                     "risk_score": 100,
                     "narrative": f"[Rule #{rule.get('rule_id')}] {rule.get('narrative')}",
+                    # NEW: pass rule metadata to AI
+                    "rule_id": rule.get("rule_id"),
+                    "rule_name": rule.get("rule_name"),
                 }
         except Exception as exc:
             print(f"[RISK_FC] Error evaluating rule: {exc}")
@@ -313,18 +326,47 @@ def evaluate_fixed_rules(features, rules):
 # ==========================
 # AI AGENT
 # ==========================
-def call_gemini_reasoning_rest(features):
+def call_gemini_reasoning_rest(features, rule_context=None):
+    """
+    Phase-2 AI Agent.
+
+    Input:
+      - features: dict from rt.risk_features
+      - rule_context: dict from evaluate_fixed_rules (contains rule_id, rule_name, narrative, decision=HOLD)
+
+    Output (dict):
+      {
+        "final_decision": "PASS" | "HOLD" | "REJECT",
+        "primary_threat": "AML" | "SCAM" | "ATO" | "INTEGRITY" | "NONE",
+        "risk_score": int 0-100,
+        "confidence": float 0.0-1.0,
+        "narrative": str,
+        "rule_alignment": "AGREES_WITH_RULE" | "OVERRIDES_TO_PASS" | "OVERRIDES_TO_REJECT"
+      }
+    """
     if not cfg.GEMINI_API_KEY:
         return {
-            "decision": "PASS",
+            "final_decision": "HOLD",
             "primary_threat": "NONE",
-            "narrative": "AI Config Missing",
             "risk_score": 0,
+            "confidence": 0.5,
+            "narrative": "AI config missing. Keeping HOLD for manual review.",
+            "rule_alignment": "AGREES_WITH_RULE",
         }
 
     try:
-        features_str     = json.dumps(features, indent=2, default=str)
-        full_text_prompt = f"{cfg.COMPREHENSIVE_REASONING_PROMPT}\n\nUser Features:\n{features_str}"
+        case_payload = {
+            "features": features,
+            "rule_engine": {
+                "initial_decision": (rule_context or {}).get("decision", "HOLD"),
+                "rule_id": (rule_context or {}).get("rule_id"),
+                "rule_name": (rule_context or {}).get("rule_name"),
+                "rule_narrative": (rule_context or {}).get("narrative"),
+            },
+        }
+
+        case_str          = json.dumps(case_payload, indent=2, default=str)
+        full_text_prompt  = f"{cfg.COMPREHENSIVE_REASONING_PROMPT}\n\nCase JSON:\n{case_str}"
 
         api_url = (
             f"https://generativelanguage.googleapis.com/v1/models/"
@@ -343,12 +385,8 @@ def call_gemini_reasoning_rest(features):
                         resp_json  = json.loads(response.read().decode("utf-8"))
                         candidates = resp_json.get("candidates", [])
                         if not candidates:
-                            return {
-                                "decision": "PASS",
-                                "primary_threat": "NONE",
-                                "narrative": "AI returned no candidates",
-                                "risk_score": 0,
-                            }
+                            break
+
                         raw_text = (
                             candidates[0]
                             .get("content", {})
@@ -361,7 +399,24 @@ def call_gemini_reasoning_rest(features):
                             .replace("```", "")
                             .strip()
                         )
-                        return json.loads(clean_text)
+                        ai_obj = json.loads(clean_text)
+
+                        # Normalise / validate fields & defaults
+                        final_decision = ai_obj.get("final_decision", "HOLD")
+                        primary_threat = ai_obj.get("primary_threat", "NONE")
+                        risk_score     = int(ai_obj.get("risk_score", 0) or 0)
+                        confidence     = float(ai_obj.get("confidence", 0.7) or 0.7)
+                        narrative      = ai_obj.get("narrative", "AI evaluation.")
+                        rule_alignment = ai_obj.get("rule_alignment", "AGREES_WITH_RULE")
+
+                        return {
+                            "final_decision": final_decision,
+                            "primary_threat": primary_threat,
+                            "risk_score": risk_score,
+                            "confidence": confidence,
+                            "narrative": narrative,
+                            "rule_alignment": rule_alignment,
+                        }
             except urllib.error.HTTPError as e:
                 print(f"[RISK_FC] HTTP Error (Gemini): {e.code}")
                 time.sleep(1)
@@ -369,19 +424,26 @@ def call_gemini_reasoning_rest(features):
                 print(f"[RISK_FC] Gemini error attempt {attempt+1}: {e}")
                 time.sleep(1)
 
+        # Fallback if all attempts fail or JSON is bad
         return {
-            "decision": "HOLD",
+            "final_decision": "HOLD",
             "primary_threat": "AI_NET_ERR",
-            "narrative": "AI Unavailable",
             "risk_score": -1,
+            "confidence": 0.5,
+            "narrative": "AI unavailable or invalid response. Keeping HOLD for manual review.",
+            "rule_alignment": "AGREES_WITH_RULE",
         }
     except Exception as exc:
+        print(f"[RISK_FC] Gemini fatal error: {exc}")
         return {
-            "decision": "HOLD",
+            "final_decision": "HOLD",
             "primary_threat": "AI_ERR",
-            "narrative": str(exc),
             "risk_score": -1,
+            "confidence": 0.5,
+            "narrative": f"AI exception: {str(exc)}",
+            "rule_alignment": "AGREES_WITH_RULE",
         }
+
 
 
 
