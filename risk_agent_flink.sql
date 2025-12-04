@@ -24,6 +24,7 @@ CREATE TEMPORARY TABLE source_withdraw_record (
     address STRING,
     withdraw_currency STRING,
     exchange_rate STRING,
+    chain STRING,
     proc_time AS PROCTIME(),
     event_time AS TO_TIMESTAMP_LTZ(create_at, 3),
     WATERMARK FOR event_time AS event_time - INTERVAL '10' SECOND
@@ -365,6 +366,7 @@ CREATE TEMPORARY TABLE risk_sink (
     address_greylisted  BOOLEAN,
     ip_greylisted       BOOLEAN,
     withdraw_currency STRING,
+    chain STRING,
 
     PRIMARY KEY (user_code, txn_id) NOT ENFORCED
 ) WITH (
@@ -557,7 +559,8 @@ SELECT
     END AS ip_greylisted,
 
     -- 32. Token / currency symbol
-    w.withdraw_currency AS withdraw_currency
+    w.withdraw_currency AS withdraw_currency,
+    w.chain AS chain
 
 
 
@@ -612,11 +615,11 @@ LEFT JOIN dim_impossible_travel FOR SYSTEM_TIME AS OF w.proc_time AS it
     ON w.user_code = it.user_code
 -- 17. Sanctions dim
 LEFT JOIN dim_sanctions_address FOR SYSTEM_TIME AS OF w.proc_time AS sanc
-    ON w.withdraw_currency = sanc.chain
+    ON w.chain = sanc.chain
    AND w.address           = sanc.destination_address
 -- 18. Destination age dim
 LEFT JOIN dim_destination_age FOR SYSTEM_TIME AS OF w.proc_time AS age
-    ON w.withdraw_currency = age.chain
+    ON w.chain = age.chain
    AND w.address           = age.destination_address
 
 -- 19. User whitelist
