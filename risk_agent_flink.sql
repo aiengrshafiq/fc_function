@@ -199,6 +199,123 @@ CREATE TEMPORARY TABLE dim_destination_age (
     'enable_binlog_filter_push_down' = 'false'
 );
 
+-- s. User Whitelist (rt.risk_whitelist_user)
+CREATE TEMPORARY TABLE dim_risk_whitelist_user (
+    user_code   STRING,
+    description STRING,
+    created_at  TIMESTAMP_LTZ(3),
+    expires_at  TIMESTAMP_LTZ(3),
+    status      STRING,
+    PRIMARY KEY (user_code) NOT ENFORCED
+) WITH (
+    'connector'='hologres',
+    'dbname'='onebullex_rt',
+    'tablename'='rt.risk_whitelist_user',
+    'username'='BASIC$shafiq',
+    'password'='HOLOGRES@424',
+    'endpoint'='hgpost-sg-u7g4iu5x2002-ap-northeast-1-vpc-st.hologres.aliyuncs.com:80',
+    'async'='true',
+    'enable_binlog_filter_push_down'='false'
+);
+
+-- t. Address Whitelist (rt.risk_whitelist_address)
+CREATE TEMPORARY TABLE dim_risk_whitelist_address (
+    destination_address STRING,
+    chain               STRING,
+    description         STRING,
+    created_at          TIMESTAMP_LTZ(3),
+    expires_at          TIMESTAMP_LTZ(3),
+    status              STRING,
+    PRIMARY KEY (destination_address) NOT ENFORCED
+) WITH (
+    'connector'='hologres',
+    'dbname'='onebullex_rt',
+    'tablename'='rt.risk_whitelist_address',
+    'username'='BASIC$shafiq',
+    'password'='HOLOGRES@424',
+    'endpoint'='hgpost-sg-u7g4iu5x2002-ap-northeast-1-vpc-st.hologres.aliyuncs.com:80',
+    'async'='true',
+    'enable_binlog_filter_push_down'='false'
+);
+
+-- u. User Blacklist (rt.risk_blacklist_user)
+CREATE TEMPORARY TABLE dim_risk_blacklist_user (
+    user_code   STRING,
+    reason      STRING,
+    created_at  TIMESTAMP_LTZ(3),
+    expires_at  TIMESTAMP_LTZ(3),
+    status      STRING,
+    PRIMARY KEY (user_code) NOT ENFORCED
+) WITH (
+    'connector'='hologres',
+    'dbname'='onebullex_rt',
+    'tablename'='rt.risk_blacklist_user',
+    'username'='BASIC$shafiq',
+    'password'='HOLOGRES@424',
+    'endpoint'='hgpost-sg-u7g4iu5x2002-ap-northeast-1-vpc-st.hologres.aliyuncs.com:80',
+    'async'='true',
+    'enable_binlog_filter_push_down'='false'
+);
+
+-- v. Address Blacklist (rt.risk_blacklist_address)
+CREATE TEMPORARY TABLE dim_risk_blacklist_address (
+    destination_address STRING,
+    chain               STRING,
+    reason              STRING,
+    created_at          TIMESTAMP_LTZ(3),
+    expires_at          TIMESTAMP_LTZ(3),
+    status              STRING,
+    PRIMARY KEY (destination_address) NOT ENFORCED
+) WITH (
+    'connector'='hologres',
+    'dbname'='onebullex_rt',
+    'tablename'='rt.risk_blacklist_address',
+    'username'='BASIC$shafiq',
+    'password'='HOLOGRES@424',
+    'endpoint'='hgpost-sg-u7g4iu5x2002-ap-northeast-1-vpc-st.hologres.aliyuncs.com:80',
+    'async'='true',
+    'enable_binlog_filter_push_down'='false'
+);
+
+-- w. IP Blacklist (rt.risk_blacklist_ip)
+CREATE TEMPORARY TABLE dim_risk_blacklist_ip (
+    ip_address STRING,
+    reason     STRING,
+    created_at TIMESTAMP_LTZ(3),
+    expires_at TIMESTAMP_LTZ(3),
+    status     STRING,
+    PRIMARY KEY (ip_address) NOT ENFORCED
+) WITH (
+    'connector'='hologres',
+    'dbname'='onebullex_rt',
+    'tablename'='rt.risk_blacklist_ip',
+    'username'='BASIC$shafiq',
+    'password'='HOLOGRES@424',
+    'endpoint'='hgpost-sg-u7g4iu5x2002-ap-northeast-1-vpc-st.hologres.aliyuncs.com:80',
+    'async'='true',
+    'enable_binlog_filter_push_down'='false'
+);
+
+-- x. Generic Greylist (rt.risk_greylist)
+CREATE TEMPORARY TABLE dim_risk_greylist (
+    entity_value STRING,
+    entity_type  STRING,
+    reason       STRING,
+    created_at   TIMESTAMP_LTZ(3),
+    expires_at   TIMESTAMP_LTZ(3),
+    status       STRING,
+    PRIMARY KEY (entity_value, entity_type) NOT ENFORCED
+) WITH (
+    'connector'='hologres',
+    'dbname'='onebullex_rt',
+    'tablename'='rt.risk_greylist',
+    'username'='BASIC$shafiq',
+    'password'='HOLOGRES@424',
+    'endpoint'='hgpost-sg-u7g4iu5x2002-ap-northeast-1-vpc-st.hologres.aliyuncs.com:80',
+    'async'='true',
+    'enable_binlog_filter_push_down'='false'
+);
+
 
 -- =========================================
 -- 4. SINK: Wide Table
@@ -238,6 +355,15 @@ CREATE TEMPORARY TABLE risk_sink (
     withdrawal_amount DOUBLE,
     sanctions_status STRING,
     age_status STRING,
+    -- NEW: list flags
+    user_whitelisted    BOOLEAN,
+    address_whitelisted BOOLEAN,
+    user_blacklisted    BOOLEAN,
+    address_blacklisted BOOLEAN,
+    ip_blacklisted      BOOLEAN,
+    user_greylisted     BOOLEAN,
+    address_greylisted  BOOLEAN,
+    ip_greylisted       BOOLEAN,
 
     PRIMARY KEY (user_code, txn_id) NOT ENFORCED
 ) WITH (
@@ -363,7 +489,73 @@ SELECT
 
     -- 23. Status columns from dims (fallback to PENDING)
     COALESCE(sanc.sanctions_status, 'PENDING') AS sanctions_status,
-    COALESCE(age.age_status,        'PENDING') AS age_status
+    COALESCE(age.age_status,        'PENDING') AS age_status,
+
+    -- 24. User whitelist flag
+    CASE 
+        WHEN uw.user_code IS NOT NULL
+         AND uw.status = 'ACTIVE'
+         AND (uw.expires_at IS NULL OR uw.expires_at > CURRENT_TIMESTAMP)
+        THEN TRUE ELSE FALSE
+    END AS user_whitelisted,
+
+    -- 25. Address whitelist flag
+    CASE 
+        WHEN wa.destination_address IS NOT NULL
+         AND wa.status = 'ACTIVE'
+         AND (wa.expires_at IS NULL OR wa.expires_at > CURRENT_TIMESTAMP)
+        THEN TRUE ELSE FALSE
+    END AS address_whitelisted,
+
+    -- 26. User blacklist flag
+    CASE 
+        WHEN bu.user_code IS NOT NULL
+         AND bu.status = 'ACTIVE'
+         AND (bu.expires_at IS NULL OR bu.expires_at > CURRENT_TIMESTAMP)
+        THEN TRUE ELSE FALSE
+    END AS user_blacklisted,
+
+    -- 27. Address blacklist flag
+    CASE 
+        WHEN ba.destination_address IS NOT NULL
+         AND ba.status = 'ACTIVE'
+         AND (ba.expires_at IS NULL OR ba.expires_at > CURRENT_TIMESTAMP)
+        THEN TRUE ELSE FALSE
+    END AS address_blacklisted,
+
+    -- 28. IP blacklist flag
+    CASE 
+        WHEN bi.ip_address IS NOT NULL
+         AND bi.status = 'ACTIVE'
+         AND (bi.expires_at IS NULL OR bi.expires_at > CURRENT_TIMESTAMP)
+        THEN TRUE ELSE FALSE
+    END AS ip_blacklisted,
+
+    -- 29. User greylist flag
+    CASE 
+        WHEN gu.entity_value IS NOT NULL
+         AND gu.status = 'ACTIVE'
+         AND (gu.expires_at IS NULL OR gu.expires_at > CURRENT_TIMESTAMP)
+        THEN TRUE ELSE FALSE
+    END AS user_greylisted,
+
+    -- 30. Address greylist flag
+    CASE 
+        WHEN ga.entity_value IS NOT NULL
+         AND ga.status = 'ACTIVE'
+         AND (ga.expires_at IS NULL OR ga.expires_at > CURRENT_TIMESTAMP)
+        THEN TRUE ELSE FALSE
+    END AS address_greylisted,
+
+    -- 31. IP greylist flag
+    CASE 
+        WHEN gi.entity_value IS NOT NULL
+         AND gi.status = 'ACTIVE'
+         AND (gi.expires_at IS NULL OR gi.expires_at > CURRENT_TIMESTAMP)
+        THEN TRUE ELSE FALSE
+    END AS ip_greylisted
+
+
 
 FROM source_withdraw_record AS w
 -- 1. User Profile
@@ -421,4 +613,32 @@ LEFT JOIN dim_sanctions_address FOR SYSTEM_TIME AS OF w.proc_time AS sanc
 -- 18. Destination age dim
 LEFT JOIN dim_destination_age FOR SYSTEM_TIME AS OF w.proc_time AS age
     ON w.withdraw_currency = age.chain
-   AND w.address           = age.destination_address;
+   AND w.address           = age.destination_address
+
+-- 19. User whitelist
+LEFT JOIN dim_risk_whitelist_user FOR SYSTEM_TIME AS OF w.proc_time AS uw
+    ON CAST(w.user_code AS STRING) = uw.user_code
+-- 20. Address whitelist
+LEFT JOIN dim_risk_whitelist_address FOR SYSTEM_TIME AS OF w.proc_time AS wa
+    ON w.address = wa.destination_address
+-- 21. User blacklist
+LEFT JOIN dim_risk_blacklist_user FOR SYSTEM_TIME AS OF w.proc_time AS bu
+    ON CAST(w.user_code AS STRING) = bu.user_code
+-- 22. Address blacklist
+LEFT JOIN dim_risk_blacklist_address FOR SYSTEM_TIME AS OF w.proc_time AS ba
+    ON w.address = ba.destination_address
+-- 23. IP blacklist
+LEFT JOIN dim_risk_blacklist_ip FOR SYSTEM_TIME AS OF w.proc_time AS bi
+    ON d.last_ip = bi.ip_address
+-- 24. User greylist
+LEFT JOIN dim_risk_greylist FOR SYSTEM_TIME AS OF w.proc_time AS gu
+    ON gu.entity_type = 'USER_CODE'
+   AND gu.entity_value = CAST(w.user_code AS STRING)
+-- 25. Address greylist
+LEFT JOIN dim_risk_greylist FOR SYSTEM_TIME AS OF w.proc_time AS ga
+    ON ga.entity_type = 'DESTINATION_ADDRESS'
+   AND ga.entity_value = w.address
+-- 26. IP greylist
+LEFT JOIN dim_risk_greylist FOR SYSTEM_TIME AS OF w.proc_time AS gi
+    ON gi.entity_type = 'IP_ADDRESS'
+   AND gi.entity_value = d.last_ip;
